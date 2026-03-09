@@ -11,7 +11,18 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from io import StringIO
 from os import getenv
-from typing import Callable, Iterable, List, Sequence
+from typing import Callable, Iterable, List, Sequence, Tuple
+
+MIN_CLOSES_FOR_INDICATORS = 34
+FALLBACK_BASE_PRICE = 100.0
+FALLBACK_TREND_STEP = 0.4
+FALLBACK_OSCILLATION = 0.2
+FALLBACK_DATA_POINTS = 40
+NEWS_TIME_WINDOW = "1d"
+BULLISH_THRESHOLD = 3
+BEARISH_THRESHOLD = -2
+POSITIVE_WORDS = ("增长", "突破", "支持", "利好", "复苏", "提振", "上调")
+NEGATIVE_WORDS = ("冲突", "制裁", "风险", "下调", "紧张", "危机", "下滑")
 
 
 @dataclass(frozen=True)
@@ -64,14 +75,17 @@ def fetch_stooq_prices(symbol: str) -> List[float]:
     closes: List[float] = []
     for row in reader:
         value = row.get("Close")
-        if not value or value == "0":
+        if not value:
             continue
         try:
-            closes.append(float(value))
+            close = float(value)
+            if close <= 0:
+                continue
+            closes.append(close)
         except ValueError:
             continue
-    if len(closes) < 20:
-        raise ValueError(f"股票 {symbol} 历史数据不足 20 个交易日，无法分析")
+    if len(closes) < MIN_CLOSES_FOR_INDICATORS:
+        raise ValueError(f"股票 {symbol} 历史数据不足 {MIN_CLOSES_FOR_INDICATORS} 个交易日，无法分析")
     return closes
 
 
@@ -83,6 +97,18 @@ def _ema(values: Sequence[float], period: int) -> float:
     for price in values[period:]:
         ema = (price - ema) * k + ema
     return ema
+
+
+def _ema_series(values: Sequence[float], period: int) -> List[float]:
+    if len(values) < period:
+        raise ValueError("EMA 计算所需数据不足")
+    k = 2 / (period + 1)
+    ema = sum(values[:period]) / period
+    series = [ema]
+    for price in values[period:]:
+        ema = (price - ema) * k + ema
+        series.append(ema)
+    return series
 
 
 def _rsi14(values: Sequence[float]) -> float:
@@ -105,8 +131,8 @@ def _rsi14(values: Sequence[float]) -> float:
 
 
 def calculate_stock_metrics(symbol: str, closes: Sequence[float]) -> StockMetrics:
-    if len(closes) < 34:
-        raise ValueError("技术指标分析至少需要 34 个交易日数据")
+    if len(closes) < MIN_CLOSES_FOR_INDICATORS:
+        raise ValueError(f"技术指标分析至少需要 {MIN_CLOSES_FOR_INDICATORS} 个交易日数据")
     closes_20d = list(closes[-20:])
     current_price = closes_20d[-1]
     returns = [
@@ -117,8 +143,14 @@ def calculate_stock_metrics(symbol: str, closes: Sequence[float]) -> StockMetric
     trend_20d = (closes_20d[-1] - closes_20d[0]) / closes_20d[0]
     sma5 = sum(closes[-5:]) / 5
     sma10 = sum(closes[-10:]) / 10
-    macd = _ema(closes, 12) - _ema(closes, 26)
-    macd_signal = _ema([_ema(closes[: i + 1], 12) - _ema(closes[: i + 1], 26) for i in range(25, len(closes))], 9)
+    ema12_series = _ema_series(closes, 12)
+    ema26_series = _ema_series(closes, 26)
+    macd_series = [
+        ema12_series[i + (26 - 12)] - ema26_series[i]
+        for i in range(len(ema26_series))
+    ]
+    macd = macd_series[-1]
+    macd_signal = _ema(macd_series, 9)
     rsi14 = _rsi14(closes)
     return StockMetrics(
         symbol=symbol.upper(),
@@ -138,7 +170,7 @@ def fetch_google_news(query: str, max_items: int = 5) -> List[NewsItem]:
     encoded = urllib.parse.quote_plus(query)
     rss_url = (
         "https://news.google.com/rss/search"
-        f"?q={encoded}+when:1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+        f"?q={encoded}+when:{NEWS_TIME_WINDOW}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
     )
     with urllib.request.urlopen(rss_url, timeout=10) as response:
         xml_text = response.read()
@@ -154,23 +186,20 @@ def fetch_google_news(query: str, max_items: int = 5) -> List[NewsItem]:
     return items
 
 
-def fetch_today_context_news(max_items: int = 5) -> tuple[List[NewsItem], List[NewsItem]]:
+def fetch_political_and_policy_news(max_items: int = 5) -> Tuple[List[NewsItem], List[NewsItem]]:
     political = fetch_google_news("重大 政治 事件", max_items=max_items)
     policy = fetch_google_news("国家 政策 发布", max_items=max_items)
     return political, policy
 
 
 def analyze_news_sentiment(news: Iterable[NewsItem]) -> NewsSentiment:
-    positive_words = ("增长", "突破", "支持", "利好", "复苏", "提振", "上调")
-    negative_words = ("冲突", "制裁", "风险", "下调", "紧张", "危机", "下滑")
-
     score = 0
     positives = 0
     negatives = 0
     for item in news:
         title = item.title
-        pos = sum(word in title for word in positive_words)
-        neg = sum(word in title for word in negative_words)
+        pos = sum(word in title for word in POSITIVE_WORDS)
+        neg = sum(word in title for word in NEGATIVE_WORDS)
         positives += pos
         negatives += neg
         score += pos - neg
@@ -220,9 +249,9 @@ def generate_recommendation(stock: StockMetrics, sentiment: NewsSentiment) -> tu
     else:
         reasons.append("消息面中性。")
 
-    if score >= 3:
+    if score >= BULLISH_THRESHOLD:
         recommendation = "偏多（可考虑分批买入）"
-    elif score <= -2:
+    elif score <= BEARISH_THRESHOLD:
         recommendation = "偏空（建议控制仓位或观望）"
     else:
         recommendation = "中性（建议等待更明确信号）"
@@ -232,13 +261,16 @@ def generate_recommendation(stock: StockMetrics, sentiment: NewsSentiment) -> tu
 def analyze_stock(
     symbol: str,
     price_provider: Callable[[str], Sequence[float]] = fetch_stooq_prices,
-    news_provider: Callable[[int], tuple[List[NewsItem], List[NewsItem]]] = fetch_today_context_news,
+    news_provider: Callable[[int], Tuple[List[NewsItem], List[NewsItem]]] = fetch_political_and_policy_news,
 ) -> AnalysisResult:
     source_note = "数据来源：在线行情与公开新闻 RSS"
     try:
         closes = list(price_provider(symbol))
     except Exception:
-        closes = [100 + i * 0.4 + ((-1) ** i) * 0.2 for i in range(40)]
+        closes = [
+            FALLBACK_BASE_PRICE + i * FALLBACK_TREND_STEP + ((-1) ** i) * FALLBACK_OSCILLATION
+            for i in range(FALLBACK_DATA_POINTS)
+        ]
         source_note = "数据来源：在线行情不可用，已切换为内置示例行情数据"
     stock = calculate_stock_metrics(symbol, closes)
 

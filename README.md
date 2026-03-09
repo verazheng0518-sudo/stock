@@ -11,7 +11,7 @@
 ## 使用方式
 
 ```bash
-python /home/runner/work/stock/stock/stock_analyzer.py AAPL
+python stock_analyzer.py AAPL
 ```
 
 > 支持通过 `STOCK_NEWS_MAX_ITEMS` 环境变量控制新闻条数（默认每类 5 条）。

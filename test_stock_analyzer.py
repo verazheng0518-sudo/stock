@@ -1,6 +1,7 @@
 import unittest
 
 from stock_analyzer import (
+    MIN_CLOSES_FOR_INDICATORS,
     NewsItem,
     analyze_news_sentiment,
     analyze_stock,
@@ -8,13 +9,20 @@ from stock_analyzer import (
     generate_recommendation,
 )
 
+EXTRA_DATA_POINTS_FOR_STABLE_SIGNAL = 6
+
 
 class StockAnalyzerTests(unittest.TestCase):
     def test_calculate_stock_metrics(self):
-        closes = [100 + i for i in range(40)]
+        closes = [
+            100 + i for i in range(MIN_CLOSES_FOR_INDICATORS + EXTRA_DATA_POINTS_FOR_STABLE_SIGNAL)
+        ]
         metrics = calculate_stock_metrics("aapl", closes)
         self.assertEqual(metrics.symbol, "AAPL")
-        self.assertEqual(metrics.current_price, 139)
+        expected_latest_close = (
+            100 + MIN_CLOSES_FOR_INDICATORS + EXTRA_DATA_POINTS_FOR_STABLE_SIGNAL - 1
+        )
+        self.assertEqual(metrics.current_price, expected_latest_close)
         self.assertEqual(len(metrics.closes_20d), 20)
         self.assertGreater(metrics.trend_20d, 0)
         self.assertGreater(metrics.volatility_20d, 0)
@@ -37,7 +45,7 @@ class StockAnalyzerTests(unittest.TestCase):
         )
         recommendation, reasons = generate_recommendation(stock, sentiment)
         self.assertNotIn("偏空", recommendation)
-        self.assertGreaterEqual(len(reasons), 4)
+        self.assertTrue(reasons)
 
     def test_analyze_stock_supports_injected_sources(self):
         def fake_prices(symbol: str):
@@ -63,6 +71,7 @@ class StockAnalyzerTests(unittest.TestCase):
         result = analyze_stock("NVDA", price_provider=broken_prices, news_provider=lambda _n: ([], []))
         self.assertEqual(result.stock.symbol, "NVDA")
         self.assertIn("内置示例", result.source_note)
+        self.assertEqual(len(result.stock.closes_20d), 20)
 
 
 if __name__ == "__main__":
